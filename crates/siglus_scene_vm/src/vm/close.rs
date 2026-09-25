@@ -73,6 +73,16 @@ fn is_close_routine(stream: &SceneStream<'_>, start: usize, end: usize, command:
                     } else if matches!(root, codes::ELM_GLOBAL_RETURNMENU | codes::ELM_GLOBAL_JUMP)
                     {
                         return Some(false);
+                    } else if root == codes::ELM_GLOBAL_EXCALL {
+                        // Discovery runs without an allocated EXCALL menu. A
+                        // cancel-menu callback can look like an exit action
+                        // while still accessing that menu's buttons or locals.
+                        // Only the allocation/call status queries are safe;
+                        // indexed or computed access is not proven standalone.
+                        let op = pushed_int(stream, next + 9)?;
+                        if !matches!(op, codes::excall_op::OP_8 | codes::excall_op::OP_12) {
+                            return Some(false);
+                        }
                     }
                 }
             }
@@ -103,11 +113,33 @@ fn is_close_routine(stream: &SceneStream<'_>, start: usize, end: usize, command:
 enum CloseEntry {
     Scene { scene: String, z: i32 },
     Command(ResolvedUserCommand),
+    Local { offset: usize },
+}
+
+// Include every GOSUB target as a boundary, but only consider targets whose
+// callers pass no arguments. Ordinary branch labels are not routine entries.
+fn local_subroutines(stream: &SceneStream<'_>) -> Option<BTreeMap<usize, bool>> {
+    let mut entries = BTreeMap::new();
+    let mut pc = 0;
+    while pc < stream.scn.len() {
+        if matches!(stream.scn[pc], CD_GOSUB | CD_GOSUBSTR) {
+            let label = usize::try_from(word(stream.scn, pc + 1)?).ok()?;
+            let offset = usize::try_from(word(stream.label_list, label.checked_mul(4)?)?).ok()?;
+            let parameterless = word(stream.scn, pc + 5)? == 0;
+            entries
+                .entry(offset)
+                .and_modify(|value| *value &= parameterless)
+                .or_insert(parameterless);
+        }
+        pc = stream.instruction_end(pc)?;
+    }
+    Some(entries)
 }
 
 impl SceneVm<'_> {
     /// Use a configured CLOSE_SCENE, or discover a unique standalone exit
-    /// action among the game's cancel-menu labels and shared user commands.
+    /// action among the game's cancel-menu labels, shared user commands, and
+    /// the active title menu's local subroutines once its buttons are ready.
     /// The host must suspend/resume its wait using the SCRIPT proc requests.
     pub fn call_game_close_scene(&mut self) -> Result<bool> {
         if self.ctx.excall_state.ready || self.ctx.excall_state.ex_call_flag {
@@ -126,6 +158,13 @@ impl SceneVm<'_> {
             CloseEntry::Command(command) => {
                 self.enter_resolved_user_command(&command, self.cfg.fm_void, &[], true, false)
             }
+            CloseEntry::Local { offset } => self.enter_current_scene_user_cmd_proc_at_offset(
+                offset,
+                self.cfg.fm_void,
+                &[],
+                true,
+                false,
+            ),
         }?;
         // The host needs a separate SCRIPT proc to suspend/resume its wait,
         // but these actions normally run on the game's regular stage. Setting
@@ -187,11 +226,42 @@ impl SceneVm<'_> {
                 }
             }
         }
+        // A title button's local callback may use title-owned objects. Never
+        // borrow it from another scene, or during title initialization.
+        let active_title = self.ctx.wait.button_selection_waiting()
+            && self
+                .ctx
+                .tables
+                .gameexe
+                .as_ref()
+                .and_then(|cfg| cfg.get_entry("MENU_SCENE"))
+                .and_then(|entry| entry.item_unquoted(0))
+                .zip(self.current_scene_name())
+                .is_some_and(|(menu, current)| siglus_name_eq(menu, current));
+        let local_entries = if active_title {
+            local_subroutines(&self.stream).unwrap_or_default()
+        } else {
+            BTreeMap::new()
+        };
+        if let Some(scene_no) = self.current_scene_no {
+            for (&offset, &parameterless) in &local_entries {
+                if parameterless {
+                    entries
+                        .entry(scene_no)
+                        .or_default()
+                        .entry(offset)
+                        .or_insert(CloseEntry::Local { offset });
+                }
+            }
+        }
         let mut found = None;
         for (scene_no, candidates) in entries {
             let stream = self.cached_scene_stream(scene_no)?;
             let mut boundaries: BTreeSet<usize> = candidates.keys().copied().collect();
             boundaries.insert(stream.scn.len());
+            if self.current_scene_no == Some(scene_no) {
+                boundaries.extend(local_entries.keys().copied());
+            }
             for z in stream.z_label_list.chunks_exact(4) {
                 if let Ok(offset) = usize::try_from(i32::from_le_bytes(z.try_into().unwrap())) {
                     boundaries.insert(offset);
@@ -233,6 +303,15 @@ mod tests {
     }
 
     fn conditional_exit(op: i32, parameters: bool, branch_outside: bool) -> SceneStream<'static> {
+        conditional_exit_with_prefix(op, parameters, branch_outside, &[])
+    }
+
+    fn conditional_exit_with_prefix(
+        op: i32,
+        parameters: bool,
+        branch_outside: bool,
+        prefix: &[u8],
+    ) -> SceneStream<'static> {
         let mut code = Vec::new();
         if parameters {
             code.push(CD_DEC_PROP);
@@ -240,6 +319,7 @@ mod tests {
             code.extend(0i32.to_le_bytes());
         }
         code.push(CD_ARG);
+        code.extend(prefix);
         push_int(&mut code, 1);
         code.push(CD_GOTO_FALSE);
         code.extend(0i32.to_le_bytes());
@@ -293,26 +373,78 @@ mod tests {
     }
 
     #[test]
+    fn rejects_exit_callbacks_that_require_excall_storage() {
+        for chain in [
+            vec![65, 1, 6, -1, 1, 5],        // excall.front.objbtngroup[1].end()
+            vec![65, -1, 1, 1, 6, -1, 1, 5], // explicit excall[1]
+            vec![65, 0, -1, 0],              // excall's local flags
+            vec![65, 4], // callbacks that allocate their own menu are not standalone
+        ] {
+            let mut prefix = vec![CD_ELM_POINT];
+            for value in chain {
+                push_int(&mut prefix, value);
+            }
+            prefix.push(CD_COMMAND);
+            for value in [0i32, 0, 0, codes::FM_VOID] {
+                prefix.extend(value.to_le_bytes());
+            }
+            let stream =
+                conditional_exit_with_prefix(codes::syscom_op::END_GAME, false, false, &prefix);
+            assert!(!is_close_routine(&stream, 0, stream.scn.len(), true));
+        }
+    }
+
+    #[test]
+    fn accepts_excall_status_queries_without_storage() {
+        for op in [codes::excall_op::OP_8, codes::excall_op::OP_12] {
+            let mut prefix = vec![CD_ELM_POINT];
+            push_int(&mut prefix, codes::ELM_GLOBAL_EXCALL);
+            push_int(&mut prefix, op);
+            prefix.push(CD_COMMAND);
+            for value in [0i32, 0, 0, codes::FM_INT] {
+                prefix.extend(value.to_le_bytes());
+            }
+            let stream =
+                conditional_exit_with_prefix(codes::syscom_op::END_GAME, false, false, &prefix);
+            assert!(is_close_routine(&stream, 0, stream.scn.len(), true));
+        }
+    }
+
+    #[test]
     #[ignore = "requires SIGLUS_CLOSE_TEST_PROJECT with game assets"]
     fn discovers_game_exit_action() {
         let project = PathBuf::from(std::env::var("SIGLUS_CLOSE_TEST_PROJECT").unwrap());
         let path = crate::resource::find_scene_pck_path(&project).unwrap();
         let options = crate::resource::load_scene_pck_decode_options(&project).unwrap();
         let pck = ScenePck::load_lazy(&path, &options).unwrap();
-        let (owner, range) = pck.scn_data_shared(0).unwrap();
+        let ctx = CommandContext::new(project);
+        let menu = ctx
+            .tables
+            .gameexe
+            .as_ref()
+            .unwrap()
+            .get_entry("MENU_SCENE")
+            .unwrap()
+            .item_unquoted(0)
+            .unwrap()
+            .to_string();
+        let scene_no = SceneVm::find_scene_no_by_name(&pck, &menu).unwrap();
+        let (owner, range) = pck.scn_data_shared(scene_no).unwrap();
         let stream =
             SceneStream::new_shared_range_with_string_codec(owner, range, pck.string_codec)
                 .unwrap();
-        let ctx = CommandContext::new(project);
         let mut vm = SceneVm::new(stream, ctx);
         vm.install_initial_scene_pck(pck, String::new());
+        vm.current_scene_no = Some(scene_no);
+        vm.current_scene_name = Some(menu);
+        vm.ctx.wait.wait_selbtn();
         let entry = vm.discover_close_entry().unwrap();
         eprintln!("discovered close entry: {entry:?}");
         assert!(entry.is_some());
         assert!(vm.call_game_close_scene().unwrap());
         assert!(vm.take_script_proc_request());
         // A cancelled game-owned action returns without requesting EndGame.
-        assert!(vm.return_from_scene(vec![]).unwrap());
+        vm.exec_return(vec![]).unwrap();
         assert!(vm.take_script_proc_pop_request());
         assert!(vm.ctx.globals.syscom.pending_proc.is_none());
     }

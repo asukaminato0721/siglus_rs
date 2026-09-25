@@ -4798,11 +4798,88 @@ mod desktop_coordinate_tests {
     use super::App;
 
     #[cfg(feature = "virtual-clock")]
+    fn close_test_excall_errors() -> &'static std::sync::Mutex<Vec<String>> {
+        struct Logger(std::sync::Mutex<Vec<String>>);
+        impl log::Log for Logger {
+            fn enabled(&self, meta: &log::Metadata<'_>) -> bool {
+                meta.level() == log::Level::Error
+            }
+            fn log(&self, record: &log::Record<'_>) {
+                if self.enabled(record.metadata()) && record.target().ends_with("forms::excall") {
+                    self.0.lock().unwrap().push(record.args().to_string());
+                }
+            }
+            fn flush(&self) {}
+        }
+        static LOGGER: Logger = Logger(std::sync::Mutex::new(Vec::new()));
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            log::set_logger(&LOGGER).unwrap();
+            log::set_max_level(log::LevelFilter::Error);
+        });
+        &LOGGER.0
+    }
+
+    #[cfg(feature = "virtual-clock")]
+    #[test]
+    #[ignore = "requires a disposable SIGLUS_CLOSE_TEST_PROJECT with Sana assets"]
+    fn game_close_during_loading_uses_fallback() {
+        use super::*;
+        let errors = close_test_excall_errors();
+        let project = std::env::var("SIGLUS_CLOSE_TEST_PROJECT").unwrap();
+        // Both the boot scene and the title's initial loading state must avoid
+        // borrowing a cancel-menu callback or uninitialized title buttons.
+        for scene in ["__start", "_01menu"] {
+            for result in [1, 0] {
+                let mut app = App::new(Args::parse_from([
+                    "siglus_engine",
+                    "--project-dir",
+                    &project,
+                    "--scene-name",
+                    scene,
+                ]));
+                app.vm = Some(app.init_vm().unwrap());
+                app.flow.push(ProcType::Script, 0);
+                let depth = app.flow.stack.len();
+                app.begin_main_window_close();
+                let vm = app.vm.as_mut().unwrap();
+                assert_eq!(vm.current_scene_name(), Some(scene));
+                assert!(!vm.take_script_proc_request());
+                assert!(!vm.ctx.excall_state.ready);
+                assert!(vm.ctx.globals.system.messagebox_modal.take().is_some());
+                assert!(app.syscom_suspended_waits.is_empty());
+                assert_eq!(app.flow.stack.len(), depth + 1);
+                vm.ctx.globals.system.messagebox_modal_result = Some(result);
+                app.pump_vm().unwrap();
+                // EndGame presents one last frame before completing.
+                if result == 0 {
+                    for _ in 0..4 {
+                        if app.pending_exit {
+                            break;
+                        }
+                        app.redraw_count += 1;
+                        app.pump_vm().unwrap();
+                    }
+                }
+                assert_eq!(app.pending_exit, result == 0);
+                assert!(
+                    !app.flow
+                        .stack
+                        .iter()
+                        .any(|proc| proc.ty == ProcType::SyscomWarning)
+                );
+            }
+        }
+        assert!(errors.lock().unwrap().is_empty(), "{errors:?}");
+    }
+
+    #[cfg(feature = "virtual-clock")]
     #[test]
     #[ignore = "requires a disposable SIGLUS_CLOSE_TEST_PROJECT; set SIGLUS_CLOSE_TEST_GAME=sprb for Summer Pockets RB"]
     fn game_close_dialog_cancel_and_confirm() {
         use super::*;
         use siglus_scene_vm::runtime::forms::codes::ELM_GLOBAL_G;
+        let errors = close_test_excall_errors();
 
         fn frames(app: &mut App, count: usize) {
             for _ in 0..count {
@@ -4902,6 +4979,7 @@ mod desktop_coordinate_tests {
             .on_mouse_up(VmMouseButton::Left);
         frames(&mut app, 240);
         assert!(app.pending_exit);
+        assert!(errors.lock().unwrap().is_empty(), "{errors:?}");
     }
 
     fn temp_project_dir(tag: &str) -> std::path::PathBuf {
