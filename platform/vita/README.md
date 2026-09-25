@@ -108,7 +108,7 @@ Vita they hold the frame.
 
 The Cg sources are `crates/siglus_scene_vm/src/render/vita/shaders/*.cg`
 (`*_v` vertex, `*_f` fragment, `*.cgh` included), ported one to one from the
-WGSL in `render/mod.rs` and `render/emote.rs`; change both together. The
+WGSL in `render/shaders/`; change both together. The
 compiled programs in `shaders/gxp/` are embedded in the player. After
 changing a shader, run
 

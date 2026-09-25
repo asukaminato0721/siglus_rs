@@ -67,7 +67,13 @@ unsafe extern "Rust" fn __getrandom_v03_custom(
 
 pub struct SwitchHost {
     host: SiglusHost,
+    frame: u64,
+    /// Frames to save as PNGs (`sdmc:/switch/siglus_rs/dump-frames`, one
+    /// frame number per line; a diagnosis aid).
+    dump_frames: Vec<u64>,
 }
+
+const DUMP_DIR: &str = "sdmc:/switch/siglus_rs/dump";
 
 impl SwitchHost {
     pub fn new(config: SiglusHostConfig, width: u32, height: u32) -> Result<Self> {
@@ -75,19 +81,50 @@ impl SwitchHost {
         let renderer = Renderer::new(width, height)?;
         report_switch_marker(b"siglus_switch: rust renderer-create complete\n\0");
         report_switch_marker(b"siglus_switch: rust host-create begin\n\0");
-        let host = SiglusHost::new_with_renderer_sync(config, renderer)?;
+        let mut host = SiglusHost::new_with_renderer_sync(config, renderer)?;
         report_switch_marker(b"siglus_switch: rust host-create complete\n\0");
-        Ok(Self { host })
+        // The game draws at its own #SCREEN_SIZE; the renderer fits that
+        // into the display (as on the Vita).
+        Self::fit_game_screen(&mut host, width, height);
+        // Line by line: `read_to_string` sizes its buffer from a file size
+        // Horizon's stat does not report sensibly here.
+        let dump_frames: Vec<u64> = std::fs::File::open("sdmc:/switch/siglus_rs/dump-frames")
+            .map(|file| {
+                std::io::BufRead::lines(std::io::BufReader::new(file))
+                    .map_while(Result::ok)
+                    .filter_map(|line| line.trim().parse().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !dump_frames.is_empty() {
+            let _ = std::fs::create_dir_all(DUMP_DIR);
+        }
+        Ok(Self {
+            host,
+            frame: 0,
+            dump_frames,
+        })
     }
 
     /// Drive one original-engine frame.  The libnx frontend supplies the
     /// elapsed time and maps controller/touch input to the shared VM input API.
     pub fn step(&mut self, dt_ms: u32) -> Result<bool> {
+        if self.dump_frames.contains(&self.frame) {
+            let path = format!("{DUMP_DIR}/frame-{}.png", self.frame);
+            self.host.renderer_mut().dump_next_frame(PathBuf::from(path));
+        }
+        self.frame += 1;
         self.host.step(dt_ms)
     }
 
+    /// The display size changed; the game keeps its own screen size.
     pub fn resize(&mut self, width: u32, height: u32) {
-        self.host.resize(width, height, 1.0);
+        Self::fit_game_screen(&mut self.host, width, height);
+    }
+
+    fn fit_game_screen(host: &mut SiglusHost, width: u32, height: u32) {
+        let (logical_w, logical_h) = host.logical_size();
+        host.resize_with_logical_viewport(width, height, 1.0, logical_w, logical_h, 0, 0, width, height);
     }
 
     pub fn key_down(&mut self, key: VmKey) {
@@ -98,8 +135,16 @@ impl SwitchHost {
         self.host.key_up(key);
     }
 
+    /// A touch at display pixel (x, y), mapped into the letterboxed game
+    /// screen.
     pub fn touch(&mut self, phase: i32, x: f64, y: f64) {
-        self.host.touch(phase, x, y);
+        let [sx, sy, sw, sh] = self.host.renderer_mut().screen_viewport();
+        let (logical_w, logical_h) = self.host.renderer_mut().logical_size();
+        let lx = ((x - f64::from(sx)) * f64::from(logical_w) / f64::from(sw.max(1.0)))
+            .clamp(0.0, f64::from(logical_w) - 1.0);
+        let ly = ((y - f64::from(sy)) * f64::from(logical_h) / f64::from(sh.max(1.0)))
+            .clamp(0.0, f64::from(logical_h) - 1.0);
+        self.host.touch(phase, lx, ly);
     }
 
     pub fn gamepad_button(&mut self, button: u8, down: bool) {

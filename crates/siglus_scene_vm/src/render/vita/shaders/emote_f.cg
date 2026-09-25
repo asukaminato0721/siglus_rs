@@ -1,4 +1,4 @@
-// E-mote object fragment (render/emote.rs `SHADER` fs_main). Stencil masks
+// E-mote object fragment (render/shaders/emote.wgsl fs_main). Stencil masks
 // use it too, with colour writes off: the discards shape the mask.
 float4 native_texture_stage(float4 c, float blend_mode)
 {

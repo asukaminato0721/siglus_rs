@@ -1,4 +1,4 @@
-// fs_common (render/mod.rs `SHADER`): 3D meshes with the tona3 lighting
+// fs_common (render/shaders/sprite.wgsl): 3D meshes with the tona3 lighting
 // models, then the shared CFX colour sequence.
 //
 // vs[120]  VsUniform (mesh.cgh)

@@ -138,6 +138,7 @@ This project is non-commercial and intended for research purposes.
 | Android | arm64-v8a, x86_64 |
 | WebAssembly | wasm32-unknown-unknown |
 | PS Vita | armv7 |
+| Nintendo Switch | aarch64 |
 
 The app launchers (macOS bundle, iOS, Android, WebAssembly) import one game or
 many games at once, detect the engine (SiglusEngine, RealLive, AVG32, UK2),

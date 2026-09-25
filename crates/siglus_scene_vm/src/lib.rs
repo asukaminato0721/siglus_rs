@@ -50,7 +50,7 @@ pub use siglus_assets as formats;
 #[cfg(not(any(target_os = "horizon", target_os = "vita")))]
 pub mod render;
 #[cfg(target_os = "horizon")]
-#[path = "render/switch.rs"]
+#[path = "render/horizon/mod.rs"]
 pub mod render;
 #[cfg(target_os = "vita")]
 #[path = "render/vita/mod.rs"]

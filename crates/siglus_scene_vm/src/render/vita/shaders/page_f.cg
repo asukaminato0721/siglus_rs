@@ -1,4 +1,4 @@
-// A page-wipe fragment (render/mod.rs `PAGE_WIPE_SHADER`).
+// A page-wipe fragment (render/shaders/page_wipe.wgsl).
 float4 main(float2 uv : TEXCOORD0, uniform sampler2D page_tex : TEXUNIT0) : COLOR
 {
     float4 color = tex2D(page_tex, uv);

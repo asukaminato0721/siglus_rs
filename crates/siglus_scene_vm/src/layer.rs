@@ -460,60 +460,6 @@ impl RenderFrame {
     }
 }
 
-/// One draw of a frame for the console renderers: a sprite at an extra
-/// alpha, or the wipe layer.
-#[derive(Debug)]
-pub enum FrameDraw<'a> {
-    Sprite(&'a RenderSprite, f32),
-    Layer(f32),
-}
-
-impl RenderFrame {
-    /// The console renderers' draws, and the sprites of the wipe layer
-    /// (drawn apart and then as one `FrameDraw::Layer`). A wipe fades from
-    /// the outgoing screen (NEXT, the saved old scene) to the incoming one
-    /// (FRONT, `current`), as the desktop renderer's cross-fade; types 1
-    /// and 2 show only FRONT or only NEXT. The desktop's mask and pattern
-    /// wipes need shaders those renderers lack, so they fade too.
-    pub fn draw_plan(&self) -> (Vec<&RenderSprite>, Vec<FrameDraw<'_>>) {
-        let mut layer = Vec::new();
-        let mut draws = Vec::new();
-        let Some(wipe) = self.wipe.as_ref() else {
-            draws.extend(self.sprites.iter().map(|item| FrameDraw::Sprite(item, 1.0)));
-            return (layer, draws);
-        };
-        let progress = wipe.progress.clamp(0.0, 1.0);
-        draws.extend(wipe.under.iter().map(|item| FrameDraw::Sprite(item, 1.0)));
-        let incoming_only = wipe.wipe_type == 1 || (wipe.wipe_type != 2 && progress >= 1.0);
-        let outgoing_only = wipe.wipe_type == 2 || progress <= 0.0;
-        if incoming_only {
-            draws.extend(wipe.current.iter().map(|item| FrameDraw::Sprite(item, 1.0)));
-        } else {
-            draws.extend(wipe.next.iter().map(|item| FrameDraw::Sprite(item, 1.0)));
-            if !outgoing_only {
-                layer.extend(&wipe.current);
-                draws.push(FrameDraw::Layer(progress));
-            }
-        }
-        draws.extend(wipe.over.iter().map(|item| FrameDraw::Sprite(item, 1.0)));
-        (layer, draws)
-    }
-
-    /// `draw_plan` with the layer's sprites faded one by one in its place
-    /// (no render target).
-    pub fn flat_draw_plan(&self) -> Vec<(&RenderSprite, f32)> {
-        let (layer, draws) = self.draw_plan();
-        let mut out = Vec::with_capacity(layer.len() + draws.len());
-        for draw in draws {
-            match draw {
-                FrameDraw::Sprite(item, fade) => out.push((item, fade)),
-                FrameDraw::Layer(alpha) => out.extend(layer.iter().map(|item| (*item, alpha))),
-            }
-        }
-        out
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct WipeRenderPlan {
     pub under: Vec<RenderSprite>,
@@ -867,68 +813,5 @@ impl LayerManager {
         }
 
         out
-    }
-}
-
-#[cfg(test)]
-mod draw_plan_tests {
-    use super::*;
-
-    fn sprite(order: i32) -> RenderSprite {
-        let mut sprite = Sprite::default();
-        sprite.order = order;
-        RenderSprite::new(None, None, sprite)
-    }
-
-    fn wipe_frame(wipe_type: i32, progress: f32) -> RenderFrame {
-        RenderFrame {
-            sprites: Vec::new(),
-            wipe: Some(WipeRenderPlan {
-                under: vec![sprite(1)],
-                current: vec![sprite(2), sprite(3)],
-                next: vec![sprite(4)],
-                over: vec![sprite(5)],
-                wipe_type,
-                option: Vec::new(),
-                progress,
-                mask_image_id: None,
-                random_seed: 0,
-            }),
-        }
-    }
-
-    fn orders(frame: &RenderFrame) -> Vec<(i32, f32)> {
-        frame
-            .flat_draw_plan()
-            .into_iter()
-            .map(|(item, fade)| (item.sprite.order, fade))
-            .collect()
-    }
-
-    #[test]
-    fn cross_fade_draws_the_old_screen_then_fades_in_the_new_one() {
-        let frame = wipe_frame(0, 0.25);
-        assert_eq!(
-            orders(&frame),
-            [(1, 1.0), (4, 1.0), (2, 0.25), (3, 0.25), (5, 1.0)]
-        );
-        let (layer, draws) = frame.draw_plan();
-        assert_eq!(layer.len(), 2);
-        assert!(matches!(draws[2], FrameDraw::Layer(p) if p == 0.25));
-    }
-
-    #[test]
-    fn wipe_ends_show_one_screen() {
-        assert_eq!(orders(&wipe_frame(0, 0.0)), [(1, 1.0), (4, 1.0), (5, 1.0)]);
-        assert_eq!(
-            orders(&wipe_frame(0, 1.0)),
-            [(1, 1.0), (2, 1.0), (3, 1.0), (5, 1.0)]
-        );
-        // Types 1 and 2: FRONT only and NEXT only, whatever the progress.
-        assert_eq!(
-            orders(&wipe_frame(1, 0.3)),
-            [(1, 1.0), (2, 1.0), (3, 1.0), (5, 1.0)]
-        );
-        assert_eq!(orders(&wipe_frame(2, 0.7)), [(1, 1.0), (4, 1.0), (5, 1.0)]);
     }
 }

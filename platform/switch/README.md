@@ -1,23 +1,24 @@
 # Switch platform port
 
 The Switch frontend reuses the existing `siglus_scene_vm` host, Scene VM,
-resource loader, script runtime, image manager, and audio engine.  It replaces
-only the desktop platform layer: libnx owns lifecycle/input/audio, while a
-Switch-native deko3d backend presents the engine's `RenderFrame`.  The Switch
-artifact contains no `winit`, `wgpu`, or desktop-window dependency. GLSL
-sources are compiled with devkitPro's `uam` into native `.dksh` modules and
-embedded in the NRO RomFS.
+resource loader, script runtime, image manager, and audio engine.  libnx owns
+lifecycle/input/audio in `runtime/source/main.c`; the artifact contains no
+`winit`, `wgpu`, or desktop-window dependency.
+
+The renderer (`crates/siglus_scene_vm/src/render/horizon`) is the desktop
+renderer with deko3d in place of wgpu: the frame is planned by the shared
+`render_plan`, drawn in the same passes (direct frames, overlay ping-pong,
+wipe composite, page wipes, E-mote targets with stencil masks, meshes and the
+shadow map), with render targets of the logical size and textures of full
+size with mip chains. The shaders are the desktop's WGSL
+(`crates/siglus_scene_vm/src/render/shaders`), translated to GLSL at build
+time by `shaderc/` (naga 0.20, the version wgpu uses) and compiled by
+devkitPro's `uam` into the RomFS. The deko3d calls live in
+`runtime/source/gpu.c`.
 
 `./platform/switch/build_switch.sh` produces:
 
 `platform/switch/runtime/siglus_switch.nro`
-
-The native runtime links the Switch-targeted `libsiglus_scene_vm.a` directly:
-libnx startup mounts SD storage, the existing host opens GameData and advances
-the VM, controller input reaches the shared VM input API, the Kira Switch
-backend feeds audren, and deko3d presents the composed frame through the new
-vertex/fragment shaders. Desktop WGPU code stays target-gated and is not part
-of this build.
 
 ## Deploying GameData
 
@@ -55,11 +56,21 @@ the asset storage location changes.
 
 ## Toolchain
 
-Install devkitA64, libnx, deko3d, and switch-tools.  The expected installation prefix is `/opt/devkitpro`; the build script sets the corresponding tool paths.
+Install devkitA64, libnx, deko3d, and switch-tools (`/opt/devkitpro`), or use
+the Docker image, which CI also builds in (`ghcr.io/xmoezzz/siglus_rs/switch-build`,
+tagged with the Dockerfile's hash):
+
+```sh
+docker build --platform linux/amd64 -t siglus-switch-build platform/switch/docker
+docker run --rm --platform linux/amd64 -v "$PWD:/src" -w /src siglus-switch-build \
+    make -C platform/switch/runtime
+```
 
 ## Layout
 
-- `runtime/` — deployable libnx/deko3d frontend linked to the existing Rust engine; `source/*.glsl` are the new Switch shader sources.
+- `runtime/` — deployable libnx/deko3d frontend linked to the existing Rust engine (`source/gpu.c`: the deko3d layer).
+- `shaderc/` — translates the desktop WGSL to GLSL for `uam`.
+- `docker/` — the build image.
 - `build_switch.sh` — packages `runtime/siglus_switch.nro`.
 - `package_game_nro.sh` — embeds a chosen game directory in a standalone NRO.
 - `rust/aarch64-switch.json` — the Rust target (`os = "horizon"`, `env = "newlib"`). The standard library is built with `-Zbuild-std`, so engine crates and their dependencies compile unmodified from crates.io.

@@ -1,4 +1,4 @@
-// The wipe compositor's full-screen triangle (render/mod.rs `WIPE_SHADER`
+// The wipe compositor's full-screen triangle (render/shaders/wipe.wgsl
 // vs_main, with the corners passed in).
 void main(float2 position, float2 uv, out float4 out_pos : POSITION, out float2 out_uv : TEXCOORD0)
 {

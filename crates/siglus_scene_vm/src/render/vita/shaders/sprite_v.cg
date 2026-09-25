@@ -1,4 +1,4 @@
-// vs_sprite_2d (render/mod.rs `SHADER`): a CPU-projected sprite vertex.
+// vs_sprite_2d (render/shaders/sprite.wgsl): a CPU-projected sprite vertex.
 // For 3D quads the original clip W is restored, so UVs and world
 // positions interpolate perspective-correctly.
 void main(

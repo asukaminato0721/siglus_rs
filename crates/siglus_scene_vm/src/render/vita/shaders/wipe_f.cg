@@ -1,4 +1,4 @@
-// The wipe compositor (render/mod.rs `WIPE_SHADER`), ported one to one.
+// The wipe compositor (render/shaders/wipe.wgsl), ported one to one.
 //
 // wu[0]      wipe type, progress, logical width, height
 // wu[1..4]   the wipe's sixteen options (15: random seed)

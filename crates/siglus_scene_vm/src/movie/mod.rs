@@ -45,8 +45,11 @@ const MPEG2_STREAM_FRAME_KEEP: usize = 1;
 const MPEG2_STREAM_DECODE_LEAD_FRAMES: usize = 3;
 #[cfg(target_os = "vita")]
 const MPEG2_STREAM_DECODE_LEAD_FRAMES: usize = 1;
+// Desktop OMV queues: a few frames of lead are enough for a desktop CPU
+// (decoding a 1920x1440 frame takes a few milliseconds), and each frame is
+// 3.5 to 8.6 MiB; GameData's title plays four streams at once.
 #[cfg(not(any(target_os = "horizon", target_os = "vita")))]
-const OMV_STREAM_CHANNEL_CAPACITY: usize = 12;
+const OMV_STREAM_CHANNEL_CAPACITY: usize = 4;
 #[cfg(target_os = "horizon")]
 const OMV_STREAM_CHANNEL_CAPACITY: usize = 4;
 #[cfg(target_os = "vita")]
@@ -56,26 +59,23 @@ const OMV_STREAM_MAX_DRAIN_EVENTS: usize = 16;
 #[cfg(any(target_os = "horizon", target_os = "vita"))]
 const OMV_STREAM_MAX_DRAIN_EVENTS: usize = 8;
 #[cfg(not(any(target_os = "horizon", target_os = "vita")))]
-const OMV_STREAM_FRAME_KEEP: usize = 16;
+const OMV_STREAM_FRAME_KEEP: usize = 6;
 #[cfg(target_os = "horizon")]
 const OMV_STREAM_FRAME_KEEP: usize = 6;
 #[cfg(target_os = "vita")]
 const OMV_STREAM_FRAME_KEEP: usize = 1;
 #[cfg(not(any(target_os = "vita", feature = "virtual-clock")))]
-const OMV_STREAM_DECODE_LEAD_FRAMES: usize = 4;
+const OMV_STREAM_DECODE_LEAD_FRAMES: usize = 2;
 /// Virtual-clock replays decode no frame ahead, so the frame on screen does
 /// not depend on how fast the decoder thread ran.
 #[cfg(all(not(target_os = "vita"), feature = "virtual-clock"))]
 const OMV_STREAM_DECODE_LEAD_FRAMES: usize = 0;
 #[cfg(target_os = "vita")]
 const OMV_STREAM_DECODE_LEAD_FRAMES: usize = 1;
-#[cfg(not(any(target_os = "horizon", target_os = "vita")))]
-const OMV_LOOP_HEAD_CACHE_MAX_FRAMES: usize = 60;
-#[cfg(any(target_os = "horizon", target_os = "vita"))]
+// A loop restart seeks by the index and decodes again (as on consoles);
+// the few cached head frames only bridge that.
 const OMV_LOOP_HEAD_CACHE_MAX_FRAMES: usize = 4;
-#[cfg(not(any(target_os = "horizon", target_os = "vita")))]
-const OMV_LOOP_HEAD_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
-#[cfg(target_os = "horizon")]
+#[cfg(not(target_os = "vita"))]
 const OMV_LOOP_HEAD_CACHE_MAX_BYTES: usize = 8 * 1024 * 1024;
 #[cfg(target_os = "vita")]
 const OMV_LOOP_HEAD_CACHE_MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -2652,6 +2652,7 @@ fn stream_omv_video_worker(
         .map(|(_, end)| *end)
         .filter(|end| *end > 0);
     let theora_type = omv.header.theora_type;
+    let mut pool = OmvFramePool::default();
 
     if tx
         .send(Ok(OmvStreamEvent::Info {
@@ -2734,6 +2735,7 @@ fn stream_omv_video_worker(
             if let Some(buf) = packed
                 && !send_omv_video_frame(
                     &tx,
+                    &mut pool,
                     target_frame,
                     &buf,
                     vinfo,
@@ -2773,6 +2775,7 @@ fn stream_omv_video_worker(
                     theora_type,
                     width,
                     height,
+                    &mut pool,
                 )
             })?
             else {
@@ -2831,6 +2834,7 @@ fn omv_should_index_seek(
 
 fn send_omv_video_frame(
     tx: &mpsc::SyncSender<Result<OmvStreamEvent, String>>,
+    pool: &mut OmvFramePool,
     frame_idx: usize,
     buf: &[u8],
     vinfo: siglus_omv_decoder::VideoInfo,
@@ -2846,7 +2850,7 @@ fn send_omv_video_frame(
         offsets: [0, y_plane_len, y_plane_len.saturating_add(u_plane_len)],
         widths: [vinfo.frame_width.max(1) as usize, uv_w, uv_w],
     };
-    let frame = omv_rgba_frame(&planes, vinfo, display_h, theora_type, width, height);
+    let frame = omv_rgba_frame(&planes, vinfo, display_h, theora_type, width, height, pool);
     Ok(tx
         .send(Ok(OmvStreamEvent::Video { frame_idx, frame }))
         .is_ok())
@@ -2861,9 +2865,20 @@ fn omv_rgba_frame(
     theora_type: u32,
     width: u32,
     height: u32,
+    pool: &mut OmvFramePool,
 ) -> Arc<RgbaImage> {
     let (output_width, output_height) = movie_output_dimensions(width, height);
-    let rgba = convert_omv_planes_to_size(
+    let mut frame = pool.take().unwrap_or_else(|| {
+        Arc::new(RgbaImage {
+            width: 0,
+            height: 0,
+            center_x: 0,
+            center_y: 0,
+            rgba: Vec::new(),
+        })
+    });
+    let image = Arc::get_mut(&mut frame).expect("a pooled frame is held only by the pool");
+    convert_omv_planes_into(
         planes,
         vinfo.frame_width,
         vinfo.frame_height,
@@ -2873,14 +2888,44 @@ fn omv_rgba_frame(
         theora_type,
         output_width as usize,
         output_height as usize,
+        &mut image.rgba,
     );
-    Arc::new(RgbaImage {
-        width: output_width,
-        height: output_height,
-        center_x: 0,
-        center_y: 0,
-        rgba,
-    })
+    image.width = output_width;
+    image.height = output_height;
+    pool.track(&frame);
+    frame
+}
+
+/// The frames an OMV worker sent, so that one the engine has let go of is
+/// decoded into again instead of allocating a new frame (3.5 MiB at 720p,
+/// 8.6 MiB for a 1920x1440 OMV, for every frame).
+#[derive(Default)]
+struct OmvFramePool {
+    sent: VecDeque<Arc<RgbaImage>>,
+}
+
+impl OmvFramePool {
+    /// Frames followed; older ones are forgotten (they are freed as before).
+    const MAX_TRACKED: usize = 64;
+
+    /// A frame nothing but the pool holds any more. The other released
+    /// frames are freed, so no more memory is kept than before.
+    fn take(&mut self) -> Option<Arc<RgbaImage>> {
+        let unique = |frame: &Arc<RgbaImage>| {
+            Arc::strong_count(frame) == 1 && Arc::weak_count(frame) == 0
+        };
+        let index = self.sent.iter().position(unique)?;
+        let frame = self.sent.remove(index);
+        self.sent.retain(|frame| !unique(frame));
+        frame
+    }
+
+    fn track(&mut self, frame: &Arc<RgbaImage>) {
+        self.sent.push_back(frame.clone());
+        if self.sent.len() > Self::MAX_TRACKED {
+            self.sent.pop_front();
+        }
+    }
 }
 
 fn select_stream_frame(
@@ -5336,6 +5381,7 @@ fn bilinear_omv_sample(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn convert_omv_planes_to_size(
     planes: &impl OmvPlanes,
     frame_width: i32,
@@ -5347,13 +5393,44 @@ fn convert_omv_planes_to_size(
     output_width: usize,
     output_height: usize,
 ) -> Vec<u8> {
+    let mut rgba = Vec::new();
+    convert_omv_planes_into(
+        planes,
+        frame_width,
+        frame_height,
+        fmt,
+        display_width,
+        display_height,
+        theora_type,
+        output_width,
+        output_height,
+        &mut rgba,
+    );
+    rgba
+}
+
+/// `convert_omv_planes_to_size` into `rgba` (reused: every pixel is
+/// written, so a buffer of the right size is not cleared first).
+#[allow(clippy::too_many_arguments)]
+fn convert_omv_planes_into(
+    planes: &impl OmvPlanes,
+    frame_width: i32,
+    frame_height: i32,
+    fmt: i32,
+    display_width: i32,
+    display_height: i32,
+    theora_type: u32,
+    output_width: usize,
+    output_height: usize,
+    rgba: &mut Vec<u8>,
+) {
     let sw = frame_width.max(1) as usize;
     let sh = frame_height.max(1) as usize;
     let dw = display_width.max(1) as usize;
     let dh = display_height.max(1) as usize;
     let (uv_w, uv_h) = yuv_plane_size(frame_width, frame_height, fmt);
 
-    let mut rgba = vec![0u8; output_width.saturating_mul(output_height).saturating_mul(4)];
+    rgba.resize(output_width.saturating_mul(output_height).saturating_mul(4), 0);
     // Source column of each output column, and how much of a row they
     // span: rows are then read as slices (per-pixel sampling with a division
     // and bounds checks took longer than decoding a 1080p frame).
@@ -5490,8 +5567,6 @@ fn convert_omv_planes_to_size(
             }
         }
     }
-
-    rgba
 }
 
 fn get_plane_sample(

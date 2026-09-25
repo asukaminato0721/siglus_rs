@@ -1,4 +1,4 @@
-// fs_common_2d (render/mod.rs `SHADER`): every sprite effect.
+// fs_common_2d (render/shaders/sprite.wgsl): every sprite effect.
 //
 // fu[0..10]  sprite_effects (effects1..effects11, see render_plan)
 // fu[11]     tex0 size, tex3 size (source image sizes)

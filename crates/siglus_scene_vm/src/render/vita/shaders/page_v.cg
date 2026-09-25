@@ -1,4 +1,4 @@
-// A page-wipe vertex (render/mod.rs `PAGE_WIPE_SHADER`): clip position
+// A page-wipe vertex (render/shaders/page_wipe.wgsl): clip position
 // from the CPU.
 void main(float4 clip_position, float2 uv, out float4 out_pos : POSITION, out float2 out_uv : TEXCOORD0)
 {

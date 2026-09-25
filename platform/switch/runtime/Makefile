@@ -27,28 +27,40 @@ ifeq ($(UNWINDING_PATCH),1)
 RUST_PATCHES += --config 'patch.crates-io.unwinding.path="platform/switch/patches/unwinding-0.2.10"'
 endif
 
-OBJECTS := $(BUILD)/main.o
-SHADERS := $(ROMFS)/shaders/siglus_vsh.dksh $(ROMFS)/shaders/siglus_fsh.dksh
+OBJECTS := $(BUILD)/main.o $(BUILD)/gpu.o
+# The desktop renderer's WGSL, translated to GLSL by ../shaderc (naga) and
+# compiled by uam: the Switch draws with the desktop's shaders.
+WGSL_DIR := ../../../crates/siglus_scene_vm/src/render/shaders
+GLSL_DIR := $(BUILD)/glsl
+SHADER_NAMES := sprite mesh shadow wipe page emote
+SHADERS := $(foreach n,$(SHADER_NAMES),$(ROMFS)/shaders/$(n)_vsh.dksh $(ROMFS)/shaders/$(n)_fsh.dksh)
 
-.PHONY: all clean
+# `rust` always runs cargo (incremental): the library depends on the whole
+# engine source, which make cannot see, so the ELF is always relinked.
+.PHONY: all clean rust
 all: $(TARGET).nro
 
-$(RUST_LIB):
+rust:
 	cd ../../.. && RUSTFLAGS='--cfg getrandom_backend="custom"' rustup run nightly-2026-01-20 cargo build $(RUST_PATCHES) -p siglus_scene_vm --lib --release --target platform/switch/rust/aarch64-switch.json -Zbuild-std=std,panic_abort
 
 $(BUILD) $(ROMFS)/shaders:
 	mkdir -p $@
 
-$(BUILD)/main.o: source/main.c | $(BUILD)
+$(BUILD)/%.o: source/%.c | $(BUILD)
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
-$(ROMFS)/shaders/siglus_vsh.dksh: source/siglus_vsh.glsl | $(ROMFS)/shaders
-	$(UAM) --stage=vert --out=$@ $<
+$(GLSL_DIR)/.stamp: $(wildcard $(WGSL_DIR)/*.wgsl) ../shaderc/src/main.rs | $(BUILD)
+	mkdir -p $(GLSL_DIR)
+	cargo run --release --manifest-path ../shaderc/Cargo.toml -- $(WGSL_DIR) $(GLSL_DIR)
+	touch $@
 
-$(ROMFS)/shaders/siglus_fsh.dksh: source/siglus_fsh.glsl | $(ROMFS)/shaders
-	$(UAM) --stage=frag --out=$@ $<
+$(ROMFS)/shaders/%_vsh.dksh: $(GLSL_DIR)/.stamp | $(ROMFS)/shaders
+	$(UAM) --stage=vert --out=$@ $(GLSL_DIR)/$*_vsh.glsl
 
-$(TARGET).elf: $(OBJECTS) $(RUST_LIB)
+$(ROMFS)/shaders/%_fsh.dksh: $(GLSL_DIR)/.stamp | $(ROMFS)/shaders
+	$(UAM) --stage=frag --out=$@ $(GLSL_DIR)/$*_fsh.glsl
+
+$(TARGET).elf: $(OBJECTS) rust
 	$(CC) $(LDFLAGS) $(OBJECTS) $(RUST_LIB) $(LDLIBS) -o $@
 
 $(TARGET).nacp:

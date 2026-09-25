@@ -1,4 +1,4 @@
-// E-mote object vertex (render/emote.rs `SHADER` vs_main).
+// E-mote object vertex (render/shaders/emote.wgsl vs_main).
 void main(
     float2 clip_position,
     float2 model_position,

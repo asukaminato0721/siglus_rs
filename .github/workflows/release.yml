@@ -292,6 +292,52 @@ jobs:
           path: dist/vita/siglus-psvita.vpk
           if-no-files-found: error
 
+  switch_image:
+    name: switch build image
+    uses: ./.github/workflows/switch-image.yml
+    permissions:
+      contents: read
+      packages: write
+
+  switch:
+    name: switch (nro)
+    needs: switch_image
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: read
+    # devkitA64, libnx, deko3d, uam and the pinned nightly
+    # (platform/switch/docker/Dockerfile).
+    container:
+      image: ${{ needs.switch_image.outputs.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    env:
+      # The Makefile sets the Switch target's RUSTFLAGS itself.
+      RUSTFLAGS: ""
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build NRO
+        run: |
+          set -euo pipefail
+          make -C platform/switch/runtime
+          mkdir -p dist/switch
+          cp platform/switch/runtime/siglus_switch.nro dist/switch/siglus-switch.nro
+
+      - name: Upload NRO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: siglus-switch
+          path: dist/switch/siglus-switch.nro
+          if-no-files-found: error
+
   macos:
     name: macos (arm64 + x86_64 + universal dmg)
     runs-on: macos-15
@@ -671,7 +717,7 @@ jobs:
   prerelease:
     name: Publish GitHub Pre-release (non-tag pushes only)
     if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')
-    needs: [meta, linux_x86_64, linux_aarch64, freebsd, wasm, vita, macos, ios, windows, android]
+    needs: [meta, linux_x86_64, linux_aarch64, freebsd, wasm, vita, switch, macos, ios, windows, android]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -722,6 +768,7 @@ jobs:
             _artifacts/siglus-freebsd-x86_64/siglus-freebsd-x86_64.tar.gz \
             _artifacts/siglus-wasm/siglus_rs-wasm.zip \
             _artifacts/siglus-psvita/siglus-psvita.vpk \
+            _artifacts/siglus-switch/siglus-switch.nro \
             _artifacts/siglus-macos-arm64/siglus-macos-arm64.app.tar.gz \
             _artifacts/siglus-macos-x86_64/siglus-macos-x86_64.app.tar.gz \
             _artifacts/siglus-macos-universal/Siglus-universal.dmg \
@@ -733,7 +780,7 @@ jobs:
   release:
     name: Publish GitHub Release (tags only)
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [meta, linux_x86_64, linux_aarch64, freebsd, wasm, vita, macos, ios, windows, android]
+    needs: [meta, linux_x86_64, linux_aarch64, freebsd, wasm, vita, switch, macos, ios, windows, android]
     runs-on: ubuntu-latest
     permissions:
       contents: write

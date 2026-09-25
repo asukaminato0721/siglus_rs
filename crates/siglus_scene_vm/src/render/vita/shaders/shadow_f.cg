@@ -1,4 +1,4 @@
-// fs_shadow_map (render/mod.rs `SHADER` fs_shadow_common): the depth of a
+// fs_shadow_map (render/shaders/sprite.wgsl fs_shadow_common): the depth of a
 // shadow caster, grey.
 uniform float4 vs[120];
 

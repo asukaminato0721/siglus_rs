@@ -1,4 +1,4 @@
-// Helpers of the wgpu sprite shader (render/mod.rs `SHADER`), ported to Cg
+// Helpers of the wgpu sprite shader (render/shaders/sprite.wgsl), ported to Cg
 // one to one. Keep both in step: the Vita must draw what the desktop does.
 
 #define LUMA float3(0.2989, 0.5886, 0.1145)
